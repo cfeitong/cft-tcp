@@ -1,5 +1,6 @@
 use etherparse::{Ipv4Header, Ipv4HeaderSlice, TcpHeader, TcpHeaderSlice};
-use std::io;
+use std::io::{self, Cursor};
+use tun_tap::Iface;
 
 pub enum State {
     Closed,
@@ -78,66 +79,75 @@ struct ReceiveSequence {
     irs: u32,
 }
 
-impl Default for Connection {
-    fn default() -> Self {
-        Connection {
-            state: State::Listen,
-        }
-    }
-}
-
 impl Connection {
+    pub fn accept(
+        nic: &mut Iface,
+        ip_hdr: Ipv4HeaderSlice,
+        tcp_hdr: TcpHeaderSlice,
+    ) -> io::Result<Option<Self>> {
+        if !tcp_hdr.syn() {
+            return Ok(None);
+        }
+
+        let iss = 0;
+        let c = Connection {
+            state: State::SynRcvd,
+            tx: SendSequence {
+                una: iss,
+                nxt: iss + 1,
+                wnd: 10,
+                up: false,
+                wl1: 0,
+                wl2: 0,
+                iss,
+            },
+            rx: ReceiveSequence {
+                nxt: tcp_hdr.sequence_number() + 1,
+                wnd: tcp_hdr.window_size(),
+                up: false,
+                irs: tcp_hdr.sequence_number(),
+            },
+        };
+        let mut syn_ack = TcpHeader::new(
+            tcp_hdr.destination_port(),
+            tcp_hdr.source_port(),
+            c.tx.iss,
+            c.tx.wnd,
+        );
+        syn_ack.syn = true;
+        syn_ack.ack = true;
+        syn_ack.acknowledgment_number = c.rx.nxt;
+        let ip = Ipv4Header::new(
+            syn_ack.header_len(),
+            64,
+            etherparse::IpNumber::Tcp,
+            ip_hdr.destination_addr().octets(),
+            ip_hdr.source_addr().octets(),
+        );
+        let mut buf = Cursor::new([0u8; 1500]);
+        let written = {
+            ip.write(&mut buf).map_err(|err| match err {
+                etherparse::WriteError::IoError(err) => err,
+                _ => unimplemented!(),
+            })?;
+            syn_ack.write(&mut buf)?;
+            buf.position() as usize
+        };
+        let buf = buf.into_inner();
+        nic.send(&buf[..written])?;
+        Ok(Some(c))
+    }
+
     pub fn on_packet(
         &mut self,
+        nic: &mut Iface,
         ip_hdr: Ipv4HeaderSlice,
         tcp_hdr: TcpHeaderSlice,
         data: &[u8],
     ) -> io::Result<usize> {
-        let mut buf = [0u8; 1500];
         match &self.state {
             State::Closed => Ok(0),
-            State::Listen => {
-                if !tcp_hdr.syn() {
-                    return Ok(0);
-                }
-
-                self.rx.irs = tcp_hdr.sequence_number();
-                self.rx.nxt = tcp_hdr.sequence_number() + 1;
-                self.rx.wnd = tcp_hdr.window_size();
-
-                self.tx.iss = 0;
-                self.tx.una = 0;
-                self.tx.nxt = self.tx.una + 1;
-                self.tx.wnd = 10;
-
-                let mut syn_ack = TcpHeader::new(
-                    tcp_hdr.destination_port(),
-                    tcp_hdr.source_port(),
-                    self.tx.iss,
-                    self.tx.wnd,
-                );
-                syn_ack.syn = true;
-                syn_ack.ack = true;
-                syn_ack.acknowledgment_number = self.rx.nxt;
-                let mut ip = Ipv4Header::new(
-                    syn_ack.header_len(),
-                    64,
-                    etherparse::IpNumber::Tcp,
-                    ip_hdr.destination_addr().octets(),
-                    ip_hdr.source_addr().octets(),
-                );
-                let written = {
-                    let mut unwritten = &mut buf[..];
-                    ip.write(&mut unwritten).map_err(|err| match err {
-                        etherparse::WriteError::IoError(err) => err,
-                        _ => unimplemented!(),
-                    })?;
-                    syn_ack.write(&mut unwritten)?;
-                    unwritten.len()
-                };
-                self.state = State::SynRcvd;
-                Ok(written)
-            }
+            State::Listen => Ok(0),
             State::SynRcvd => todo!(),
             State::SynSent => todo!(),
             State::Established => todo!(),

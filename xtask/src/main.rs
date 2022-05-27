@@ -1,5 +1,5 @@
 use clap::Parser;
-use cmd_lib::{run_cmd, spawn};
+use cmd_lib::{init_builtin_logger, run_cmd, spawn};
 use color_eyre::Result;
 
 #[derive(Parser)]
@@ -27,18 +27,19 @@ fn commit(action: Action) -> Result<()> {
             let mut h = spawn! {
                 ./target/debug/cft-tcp;
             }?;
-            run_cmd! {
+            let output = run_cmd! {
                 sudo ip addr add 192.168.0.1/24 dev tun0;
                 sudo ip link set up dev tun0;
             }?;
             // sudo ip -6 addr flush tun0;
-            h.wait()?;
+            let output = h.wait()?;
         }
     }
     Ok(())
 }
 
 fn main() -> Result<()> {
+    init_builtin_logger();
     let arg: Arg = Arg::parse();
     commit(arg.action)?;
     Ok(())

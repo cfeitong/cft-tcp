@@ -11,8 +11,8 @@ struct Quad {
 }
 
 fn main() -> Result<()> {
-    let nic = tun_tap::Iface::new("tun0", tun_tap::Mode::Tun)?;
-    let mut tcp_conn: HashMap<Quad, tcp::State> = HashMap::new();
+    let mut nic = tun_tap::Iface::new("tun0", tun_tap::Mode::Tun)?;
+    let mut tcp_conn: HashMap<Quad, tcp::Connection> = HashMap::new();
     loop {
         let mut buf = [0u8; 1504];
         let read = nic.recv(&mut buf[..])?;
@@ -36,11 +36,25 @@ fn main() -> Result<()> {
                             src: (ip_hdr.source_addr(), tcp_hdr.source_port()),
                             dst: (ip_hdr.source_addr(), tcp_hdr.destination_port()),
                         };
-                        tcp_conn.entry(quad).or_default().on_packet(
-                            ip_hdr.clone(),
-                            tcp_hdr.clone(),
-                            data,
-                        );
+                        match tcp_conn.entry(quad) {
+                            std::collections::hash_map::Entry::Occupied(mut c) => {
+                                c.get_mut().on_packet(
+                                    &mut nic,
+                                    ip_hdr.clone(),
+                                    tcp_hdr.clone(),
+                                    data,
+                                )?;
+                            }
+                            std::collections::hash_map::Entry::Vacant(v) => {
+                                if let Some(c) = tcp::Connection::accept(
+                                    &mut nic,
+                                    ip_hdr.clone(),
+                                    tcp_hdr.clone(),
+                                )? {
+                                    v.insert(c);
+                                }
+                            }
+                        };
                         println!(
                             "from {}:{} to {}:{}",
                             ip_hdr.source_addr(),
