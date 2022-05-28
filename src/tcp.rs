@@ -1,5 +1,5 @@
 use etherparse::{Ipv4Header, Ipv4HeaderSlice, TcpHeader, TcpHeaderSlice};
-use std::io::{self, Cursor};
+use std::io::{self, Cursor, Write};
 use tun_tap::Iface;
 
 pub enum State {
@@ -95,7 +95,7 @@ impl Connection {
             tx: SendSequence {
                 una: iss,
                 nxt: iss + 1,
-                wnd: 10,
+                wnd: tcp_hdr.window_size(),
                 up: false,
                 wl1: 0,
                 wl2: 0,
@@ -148,7 +148,7 @@ impl Connection {
         match &self.state {
             State::Closed => Ok(0),
             State::Listen => Ok(0),
-            State::SynRcvd => todo!(),
+            State::SynRcvd => Ok(0),
             State::SynSent => todo!(),
             State::Established => todo!(),
             State::FinWait1 => todo!(),
