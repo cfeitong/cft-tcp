@@ -117,13 +117,15 @@ impl Connection {
         syn_ack.syn = true;
         syn_ack.ack = true;
         syn_ack.acknowledgment_number = c.rx.nxt;
-        let ip = Ipv4Header::new(
+        let mut ip = Ipv4Header::new(
             syn_ack.header_len(),
             64,
             etherparse::IpNumber::Tcp,
             ip_hdr.destination_addr().octets(),
             ip_hdr.source_addr().octets(),
         );
+        ip.set_payload_len(syn_ack.header_len() as usize)
+            .expect("ip header too large");
         let mut buf = Cursor::new([0u8; 1500]);
         let written = {
             ip.write(&mut buf).map_err(|err| match err {
@@ -148,7 +150,16 @@ impl Connection {
         match &self.state {
             State::Closed => Ok(0),
             State::Listen => Ok(0),
-            State::SynRcvd => Ok(0),
+            State::SynRcvd => {
+                println!("{:?}", tcp_hdr);
+                if !tcp_hdr.ack() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::ConnectionReset,
+                        "must get an ack",
+                    ));
+                }
+                Ok(0)
+            }
             State::SynSent => todo!(),
             State::Established => todo!(),
             State::FinWait1 => todo!(),
