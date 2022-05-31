@@ -147,6 +147,7 @@ impl Connection {
         tcp_hdr: TcpHeaderSlice,
         data: &[u8],
     ) -> io::Result<usize> {
+        self.check_ack_constriant(tcp_hdr.acknowledgment_number())?;
         match &self.state {
             State::Closed => Ok(0),
             State::Listen => Ok(0),
@@ -169,5 +170,24 @@ impl Connection {
             State::CloseWait => todo!(),
             State::LastAck => todo!(),
         }
+    }
+
+    fn check_ack_constriant(&self, ackn: u32) -> io::Result<()> {
+        if self.tx.nxt > self.tx.una {
+            if ackn <= self.tx.una || ackn > self.tx.nxt {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "ackn is out of range",
+                ));
+            }
+        } else {
+            if self.tx.nxt < ackn && ackn <= self.tx.una {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "ackn is out of range",
+                ));
+            }
+        }
+        Ok(())
     }
 }
