@@ -126,6 +126,10 @@ impl Connection {
         );
         ip.set_payload_len(syn_ack.header_len() as usize)
             .expect("ip header too large");
+        let checksum = syn_ack
+            .calc_checksum_ipv4(&ip, &[])
+            .expect("fail to calculate tcp checksum");
+        syn_ack.checksum = checksum;
         let mut buf = Cursor::new([0u8; 1500]);
         let written = {
             ip.write(&mut buf).map_err(|err| match err {
@@ -153,7 +157,6 @@ impl Connection {
             State::Closed => Ok(0),
             State::Listen => Ok(0),
             State::SynRcvd => {
-                println!("{:?}", tcp_hdr);
                 if !tcp_hdr.ack() {
                     return Err(io::Error::new(
                         io::ErrorKind::ConnectionReset,
