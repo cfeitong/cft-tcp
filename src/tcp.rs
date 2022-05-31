@@ -147,7 +147,8 @@ impl Connection {
         tcp_hdr: TcpHeaderSlice,
         data: &[u8],
     ) -> io::Result<usize> {
-        self.check_ack_constriant(tcp_hdr.acknowledgment_number())?;
+        self.check_acceptable_ack(tcp_hdr.acknowledgment_number())?;
+        self.check_valid_segment(tcp_hdr.sequence_number())?;
         match &self.state {
             State::Closed => Ok(0),
             State::Listen => Ok(0),
@@ -172,22 +173,34 @@ impl Connection {
         }
     }
 
-    fn check_ack_constriant(&self, ackn: u32) -> io::Result<()> {
-        if self.tx.nxt > self.tx.una {
-            if ackn <= self.tx.una || ackn > self.tx.nxt {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "ackn is out of range",
-                ));
-            }
+    fn check_acceptable_ack(&self, ackn: u32) -> io::Result<()> {
+        if is_between_wrapped(self.tx.una.wrapping_add(1), self.tx.nxt, ackn) {
+            Ok(())
         } else {
-            if self.tx.nxt < ackn && ackn <= self.tx.una {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "ackn is out of range",
-                ));
-            }
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "ackn is out of range",
+            ))
         }
-        Ok(())
+    }
+
+    fn check_valid_segment(&self, seqn: u32) -> io::Result<()> {
+        let end = self.rx.nxt.wrapping_add(self.rx.wnd as u32);
+        if is_between_wrapped(self.rx.nxt, end.wrapping_sub(1), seqn) {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "seqn is out of range",
+            ))
+        }
+    }
+}
+
+fn is_between_wrapped(start: u32, end: u32, val: u32) -> bool {
+    if start < end {
+        val >= start && val <= end
+    } else {
+        val >= start || val <= end
     }
 }
