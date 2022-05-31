@@ -152,7 +152,7 @@ impl Connection {
         data: &[u8],
     ) -> io::Result<usize> {
         self.check_acceptable_ack(tcp_hdr.acknowledgment_number())?;
-        self.check_valid_segment(tcp_hdr.sequence_number())?;
+        self.check_valid_segment(&tcp_hdr, data.len())?;
         match &self.state {
             State::Closed => Ok(0),
             State::Listen => Ok(0),
@@ -163,6 +163,7 @@ impl Connection {
                         "must get an ack",
                     ));
                 }
+                self.state = State::Established;
                 Ok(0)
             }
             State::SynSent => todo!(),
@@ -176,6 +177,12 @@ impl Connection {
         }
     }
 
+    // copied from rfc793 page 24
+
+    //      A new acknowledgment (called an "acceptable ack"), is one for which
+    //   the inequality below holds:
+
+    //     SND.UNA < SEG.ACK =< SND.NXT
     fn check_acceptable_ack(&self, ackn: u32) -> io::Result<()> {
         if is_between_wrapped(self.tx.una.wrapping_add(1), self.tx.nxt, ackn) {
             Ok(())
@@ -187,7 +194,36 @@ impl Connection {
         }
     }
 
-    fn check_valid_segment(&self, seqn: u32) -> io::Result<()> {
+    // copied frmo rfc793 page 25
+
+    // Segment Receive  Test
+    // Length  Window
+    // ------- -------  -------------------------------------------
+
+    //    0       0     SEG.SEQ = RCV.NXT
+
+    //    0      >0     RCV.NXT =< SEG.SEQ < RCV.NXT+RCV.WND
+
+    //   >0       0     not acceptable
+
+    //   >0      >0     RCV.NXT =< SEG.SEQ < RCV.NXT+RCV.WND
+    //               or RCV.NXT =< SEG.SEQ+SEG.LEN-1 < RCV.NXT+RCV.WND
+    fn check_valid_segment(&self, tcp_hdr: &TcpHeaderSlice, slen: usize) -> io::Result<()> {
+        let seqn = tcp_hdr.sequence_number();
+        if slen == 0 && tcp_hdr.window_size() == 0 {
+            if seqn != self.rx.nxt {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "seg.seq should equals rcv.nxt if  seg.len = 0 and seg.wnd = 0",
+                ));
+            }
+        }
+        if slen > 0 && tcp_hdr.window_size() == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "seg.wnd should not be 0 if seg.len > 0",
+            ));
+        }
         let end = self.rx.nxt.wrapping_add(self.rx.wnd as u32);
         if is_between_wrapped(self.rx.nxt, end.wrapping_sub(1), seqn) {
             Ok(())
