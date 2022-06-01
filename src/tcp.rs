@@ -1,5 +1,6 @@
 use etherparse::{Ipv4Header, Ipv4HeaderSlice, TcpHeader, TcpHeaderSlice};
 use std::io::{self, Cursor, Write};
+use tracing::debug;
 use tun_tap::Iface;
 
 pub enum State {
@@ -151,8 +152,14 @@ impl Connection {
         tcp_hdr: TcpHeaderSlice,
         data: &[u8],
     ) -> io::Result<usize> {
-        self.check_acceptable_ack(tcp_hdr.acknowledgment_number())?;
-        self.check_valid_segment(&tcp_hdr, data.len())?;
+        if let Err(err) = self.check_acceptable_ack(tcp_hdr.acknowledgment_number()) {
+            debug!(error=?err, "invalid acknowledgment number");
+            return Ok(0);
+        }
+        if let Err(err) = self.check_valid_segment(&tcp_hdr, data.len()) {
+            debug!(error=?err, "invalid segment");
+            return Ok(0);
+        }
         match &self.state {
             State::Closed => Ok(0),
             State::Listen => Ok(0),

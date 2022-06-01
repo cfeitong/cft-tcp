@@ -11,6 +11,7 @@ struct Quad {
 }
 
 fn main() -> Result<()> {
+    tracing_subscriber::fmt::init();
     let mut nic = tun_tap::Iface::without_packet_info("tun0", tun_tap::Mode::Tun)?;
     let mut tcp_conn: HashMap<Quad, tcp::Connection> = HashMap::new();
     loop {
