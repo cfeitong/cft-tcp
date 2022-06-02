@@ -1,9 +1,8 @@
 use etherparse::{Ipv4Header, Ipv4HeaderSlice, TcpHeader, TcpHeaderSlice};
 use std::io::{self, Cursor};
+use std::num::Wrapping;
 use tracing::debug;
 use tun_tap::Iface;
-use std::num::Wrapping;
-
 
 pub enum State {
     Closed,
@@ -60,8 +59,8 @@ pub struct Connection {
 //               update
 //     ISS     - initial send sequence number
 struct SendSequence {
-    una: u32,
-    nxt: u32,
+    una: Wrapping<u32>,
+    nxt: Wrapping<u32>,
     wnd: u16,
     up: bool,
     wl1: usize,
@@ -88,7 +87,7 @@ struct SendSequence {
 //       IRS     - initial receive sequence number
 
 struct ReceiveSequence {
-    nxt: u32,
+    nxt: Wrapping<u32>,
     wnd: u16,
     up: bool,
     irs: u32,
@@ -117,8 +116,8 @@ impl Connection {
         let mut c = Connection {
             state: State::SynRcvd,
             tx: SendSequence {
-                una: iss,
-                nxt: iss + 1,
+                una: Wrapping(iss),
+                nxt: Wrapping(iss + 1),
                 wnd: tcp_hdr.window_size(),
                 up: false,
                 wl1: 0,
@@ -126,7 +125,7 @@ impl Connection {
                 iss,
             },
             rx: ReceiveSequence {
-                nxt: tcp_hdr.sequence_number() + 1,
+                nxt: Wrapping(tcp_hdr.sequence_number()) + Wrapping(1),
                 wnd: tcp_hdr.window_size(),
                 up: false,
                 irs: tcp_hdr.sequence_number(),
@@ -147,8 +146,8 @@ impl Connection {
         let mut tcp = &mut self.tcp;
         let buf = &mut self.buf;
         buf.set_position(0);
-        tcp.sequence_number = self.tx.nxt;
-        tcp.acknowledgment_number = self.rx.nxt;
+        tcp.sequence_number = self.tx.nxt.0;
+        tcp.acknowledgment_number = self.rx.nxt.0;
         let ip = &mut self.ip;
         ip.set_payload_len(tcp.header_len() as usize + payload.len())
             .expect("ip header too large");
@@ -164,12 +163,12 @@ impl Connection {
             tcp.write(buf)?;
             buf.position() as usize
         };
-        self.tx.nxt = self.tx.nxt.wrapping_add(payload.len() as u32);
+        self.tx.nxt += payload.len() as u32;
         if self.tcp.syn {
-            self.tx.nxt = self.tx.nxt.wrapping_add(1);
+            self.tx.nxt += 1;
         }
         if self.tcp.fin {
-            self.tx.nxt = self.tx.nxt.wrapping_add(1);
+            self.tx.nxt += 1;
         }
         nic.send(&buf.get_ref()[..written])?;
         Ok(payload.len())
@@ -233,7 +232,7 @@ impl Connection {
 
     //     SND.UNA < SEG.ACK =< SND.NXT
     fn check_acceptable_ack(&self, ackn: u32) -> io::Result<()> {
-        if is_between_wrapped(self.tx.una.wrapping_add(1), self.tx.nxt, ackn) {
+        if is_between(self.tx.una + Wrapping(1), self.tx.nxt, ackn) {
             Ok(())
         } else {
             Err(io::Error::new(
@@ -260,7 +259,7 @@ impl Connection {
     fn check_valid_segment(&self, tcp_hdr: &TcpHeaderSlice, slen: usize) -> io::Result<()> {
         let seqn = tcp_hdr.sequence_number();
         if slen == 0 && tcp_hdr.window_size() == 0 {
-            if seqn != self.rx.nxt {
+            if seqn != self.rx.nxt.0 {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "seg.seq should equals rcv.nxt if  seg.len = 0 and seg.wnd = 0",
@@ -273,8 +272,8 @@ impl Connection {
                 "seg.wnd should not be 0 if seg.len > 0",
             ));
         }
-        let end = self.rx.nxt.wrapping_add(self.rx.wnd as u32);
-        if is_between_wrapped(self.rx.nxt, end.wrapping_sub(1), seqn) {
+        let end = self.rx.nxt + Wrapping(self.rx.wnd as u32);
+        if is_between(self.rx.nxt, end - Wrapping(1), seqn) {
             Ok(())
         } else {
             Err(io::Error::new(
@@ -285,7 +284,8 @@ impl Connection {
     }
 }
 
-fn is_between_wrapped(start: u32, end: u32, val: u32) -> bool {
+fn is_between(start: Wrapping<u32>, end: Wrapping<u32>, val: u32) -> bool {
+    let val = Wrapping(val);
     if start < end {
         val >= start && val <= end
     } else {
