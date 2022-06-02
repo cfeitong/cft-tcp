@@ -1,7 +1,9 @@
 use etherparse::{Ipv4Header, Ipv4HeaderSlice, TcpHeader, TcpHeaderSlice};
-use std::io::{self, Cursor, Write};
+use std::io::{self, Cursor};
 use tracing::debug;
 use tun_tap::Iface;
+use std::num::Wrapping;
+
 
 pub enum State {
     Closed,
@@ -17,10 +19,22 @@ pub enum State {
     LastAck,
 }
 
+impl State {
+    fn is_sync(&self) -> bool {
+        match self {
+            State::SynRcvd | State::SynSent | State::Listen => false,
+            _ => true,
+        }
+    }
+}
+
 pub struct Connection {
     state: State,
     tx: SendSequence,
     rx: ReceiveSequence,
+    ip: Ipv4Header,
+    tcp: TcpHeader,
+    buf: Cursor<[u8; 1500]>,
 }
 
 // Send Sequence Space
@@ -91,7 +105,16 @@ impl Connection {
         }
 
         let iss = 0;
-        let c = Connection {
+        let wnd = tcp_hdr.window_size();
+        let tcp = TcpHeader::new(tcp_hdr.destination_port(), tcp_hdr.source_port(), iss, wnd);
+        let ip = Ipv4Header::new(
+            tcp.header_len(),
+            64,
+            etherparse::IpNumber::Tcp,
+            ip_hdr.destination_addr().octets(),
+            ip_hdr.source_addr().octets(),
+        );
+        let mut c = Connection {
             state: State::SynRcvd,
             tx: SendSequence {
                 una: iss,
@@ -108,41 +131,54 @@ impl Connection {
                 up: false,
                 irs: tcp_hdr.sequence_number(),
             },
+            tcp,
+            ip,
+            buf: Cursor::new([0; 1500]),
         };
-        let mut syn_ack = TcpHeader::new(
-            tcp_hdr.destination_port(),
-            tcp_hdr.source_port(),
-            c.tx.iss,
-            c.tx.wnd,
-        );
-        syn_ack.syn = true;
-        syn_ack.ack = true;
-        syn_ack.acknowledgment_number = c.rx.nxt;
-        let mut ip = Ipv4Header::new(
-            syn_ack.header_len(),
-            64,
-            etherparse::IpNumber::Tcp,
-            ip_hdr.destination_addr().octets(),
-            ip_hdr.source_addr().octets(),
-        );
-        ip.set_payload_len(syn_ack.header_len() as usize)
+
+        let mut tcp = &mut c.tcp;
+        tcp.syn = true;
+        tcp.ack = true;
+        c.send(nic, &[])?;
+        Ok(Some(c))
+    }
+
+    fn send(&mut self, nic: &mut Iface, payload: &[u8]) -> io::Result<usize> {
+        let mut tcp = &mut self.tcp;
+        let buf = &mut self.buf;
+        buf.set_position(0);
+        tcp.sequence_number = self.tx.nxt;
+        tcp.acknowledgment_number = self.rx.nxt;
+        let ip = &mut self.ip;
+        ip.set_payload_len(tcp.header_len() as usize + payload.len())
             .expect("ip header too large");
-        let checksum = syn_ack
+        let checksum = tcp
             .calc_checksum_ipv4(&ip, &[])
             .expect("fail to calculate tcp checksum");
-        syn_ack.checksum = checksum;
-        let mut buf = Cursor::new([0u8; 1500]);
+        tcp.checksum = checksum;
         let written = {
-            ip.write(&mut buf).map_err(|err| match err {
+            ip.write(buf).map_err(|err| match err {
                 etherparse::WriteError::IoError(err) => err,
                 _ => unimplemented!(),
             })?;
-            syn_ack.write(&mut buf)?;
+            tcp.write(buf)?;
             buf.position() as usize
         };
-        let buf = buf.into_inner();
-        nic.send(&buf[..written])?;
-        Ok(Some(c))
+        self.tx.nxt = self.tx.nxt.wrapping_add(payload.len() as u32);
+        if self.tcp.syn {
+            self.tx.nxt = self.tx.nxt.wrapping_add(1);
+        }
+        if self.tcp.fin {
+            self.tx.nxt = self.tx.nxt.wrapping_add(1);
+        }
+        nic.send(&buf.get_ref()[..written])?;
+        Ok(payload.len())
+    }
+
+    fn send_rst(&mut self, nic: &mut Iface) -> io::Result<()> {
+        self.tcp.rst = true;
+        self.send(nic, &[])?;
+        Ok(())
     }
 
     pub fn on_packet(
@@ -154,10 +190,16 @@ impl Connection {
     ) -> io::Result<usize> {
         if let Err(err) = self.check_acceptable_ack(tcp_hdr.acknowledgment_number()) {
             debug!(error=?err, "invalid acknowledgment number");
+            if !self.state.is_sync() {
+                self.send_rst(nic)?;
+            }
             return Ok(0);
         }
         if let Err(err) = self.check_valid_segment(&tcp_hdr, data.len()) {
             debug!(error=?err, "invalid segment");
+            if !self.state.is_sync() {
+                self.send_rst(nic)?;
+            }
             return Ok(0);
         }
         match &self.state {
